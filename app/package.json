@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri dev",
-    "build": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri build",
-    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri"
+    "dev": "npx tauri dev",
+    "build": "npx tauri build",
+    "tauri": "npx tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
