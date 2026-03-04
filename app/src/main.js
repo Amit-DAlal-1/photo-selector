@@ -1,31 +1,34 @@
 /**
  * Photo Selector — Main Application Logic
  * A fast keyboard-driven photo shortlisting tool built with Tauri.
+ * Performance optimised: URL caching, image preloading, nav debouncing, virtual thumbnail strip.
  */
 
 const { invoke } = window.__TAURI__.core;
 const { open: dialogOpen } = window.__TAURI__.dialog;
+const { convertFileSrc } = window.__TAURI__.core;
 
 // ============================================================
 // APPLICATION STATE
 // ============================================================
 const state = {
-  images: [],           // Array of { filename, full_path, selected }
-  currentIndex: -1,     // Index into state.images (filtered view index)
+  images: [],           // Array of { filename, full_path, selected, src }
+  currentIndex: -1,     // Index into filtered view
   filter: 'all',        // 'all' | 'selected' | 'unselected'
   sourceDir: null,
   destDir: null,
+  // Virtual scroll state
+  virtualStart: 0,      // First rendered thumbnail index
+  VIRTUAL_WINDOW: 60,   // How many thumbnails to render at once
+  THUMB_ITEM_HEIGHT: 151, // px per thumbnail item: ~147px content (4/3 aspect at 196px width) + 4px gap
 };
 
 // Derived: filteredImages based on current filter
 function getFilteredImages() {
   switch (state.filter) {
-    case 'selected':
-      return state.images.filter(img => img.selected);
-    case 'unselected':
-      return state.images.filter(img => !img.selected);
-    default:
-      return state.images;
+    case 'selected': return state.images.filter(img => img.selected);
+    case 'unselected': return state.images.filter(img => !img.selected);
+    default: return state.images;
   }
 }
 
@@ -33,43 +36,55 @@ function getFilteredImages() {
 // DOM REFERENCES
 // ============================================================
 const els = {
-  // Toolbar
   btnSourceDir: document.getElementById('btnSourceDir'),
   btnDestDir: document.getElementById('btnDestDir'),
   sourceDirLabel: document.getElementById('sourceDirLabel'),
   destDirLabel: document.getElementById('destDirLabel'),
   btnComplete: document.getElementById('btnComplete'),
   filterBtns: document.querySelectorAll('.filter-btn'),
-
-  // States
   welcomeState: document.getElementById('welcomeState'),
   viewerState: document.getElementById('viewerState'),
   btnWelcomeSource: document.getElementById('btnWelcomeSource'),
-
-  // Viewer
   thumbnailList: document.getElementById('thumbnailList'),
   stripCount: document.getElementById('stripCount'),
   mainImage: document.getElementById('mainImage'),
   selectedOverlay: document.getElementById('selectedOverlay'),
-
-  // Status bar
   statusFilename: document.getElementById('statusFilename'),
   statusCounter: document.getElementById('statusCounter'),
   statusSelection: document.getElementById('statusSelection'),
   statusSelectedCount: document.getElementById('statusSelectedCount'),
   btnPrev: document.getElementById('btnPrev'),
   btnNext: document.getElementById('btnNext'),
-
-  // Modal
   modalOverlay: document.getElementById('modalOverlay'),
   modalIcon: document.getElementById('modalIcon'),
   modalTitle: document.getElementById('modalTitle'),
   modalMessage: document.getElementById('modalMessage'),
   modalClose: document.getElementById('modalClose'),
-
-  // Toast
   toast: document.getElementById('toast'),
 };
+
+// ============================================================
+// PERFORMANCE: PRELOADER CACHE
+// ============================================================
+// Keyed by full_path → HTMLImageElement (warm browser cache)
+const preloadCache = new Map();
+
+function preloadImage(img) {
+  if (!img || preloadCache.has(img.full_path)) return;
+  const el = new Image();
+  el.src = img.src;
+  preloadCache.set(img.full_path, el);
+}
+
+function preloadAdjacent(filteredIdx) {
+  const filtered = getFilteredImages();
+  // Preload next 3 and previous 2
+  for (let d = -2; d <= 3; d++) {
+    if (d === 0) continue;
+    const i = filteredIdx + d;
+    if (i >= 0 && i < filtered.length) preloadImage(filtered[i]);
+  }
+}
 
 // ============================================================
 // DIRECTORY SELECTION
@@ -110,23 +125,24 @@ async function loadImages() {
   try {
     const rawImages = await invoke('list_images', { dir: state.sourceDir });
 
-    // Attempt to restore previous selection from selection.json
+    // Restore previous selection
     let previousSelection = [];
-    try {
-      previousSelection = await invoke('load_selection', { dir: state.sourceDir });
-    } catch (_) {}
+    try { previousSelection = await invoke('load_selection', { dir: state.sourceDir }); } catch (_) { }
     const prevSet = new Set(previousSelection);
 
+    // Pre-compute convertFileSrc for every image ONCE — avoids repeated calls per render
     state.images = rawImages.map(img => ({
       ...img,
       selected: prevSet.has(img.filename),
+      src: convertFileSrc(img.full_path),  // cached URL
     }));
 
+    preloadCache.clear();
     state.currentIndex = 0;
     state.filter = 'all';
+    state.virtualStart = 0;
     updateFilterButtons();
 
-    // Switch to viewer state
     els.welcomeState.classList.add('hidden');
     els.viewerState.classList.remove('hidden');
 
@@ -134,44 +150,137 @@ async function loadImages() {
     displayImage(0);
     updateCompleteButton();
     updateStripCount();
+
+    // Kick off background preload of first few images
+    const filtered = getFilteredImages();
+    for (let i = 0; i < Math.min(5, filtered.length); i++) preloadImage(filtered[i]);
+
   } catch (e) {
     showModal('error', 'No Images Found', String(e));
   }
 }
 
 // ============================================================
-// THUMBNAIL STRIP
+// VIRTUAL THUMBNAIL STRIP
 // ============================================================
+// We only render VIRTUAL_WINDOW items around the active index.
+// A top/bottom spacer div pushes the scrollbar to show correct total height.
+
+let _stripScrollHandler = null;
+
 function renderThumbnailStrip() {
+  // Remove old scroll listener
+  if (_stripScrollHandler) {
+    els.thumbnailList.removeEventListener('scroll', _stripScrollHandler);
+    _stripScrollHandler = null;
+  }
+
   els.thumbnailList.innerHTML = '';
   const filtered = getFilteredImages();
 
   if (filtered.length === 0) {
     const empty = document.createElement('div');
-    empty.style.cssText = 'padding:20px;text-align:center;color:var(--text-muted);font-size:12px;';
+    empty.className = 'thumb-empty';
     empty.textContent = 'No images match this filter.';
     els.thumbnailList.appendChild(empty);
     return;
   }
 
-  filtered.forEach((img, filteredIdx) => {
+  // For small sets render everything directly (no virtual overhead)
+  if (filtered.length <= state.VIRTUAL_WINDOW) {
+    renderThumbRange(filtered, 0, filtered.length);
+    highlightActiveThumbnail();
+    return;
+  }
+
+  // Virtual rendering
+  _renderVirtualStrip(filtered);
+}
+
+function _renderVirtualStrip(filtered) {
+  const total = filtered.length;
+  const H = state.THUMB_ITEM_HEIGHT;
+
+  // Compute window
+  const start = Math.max(0, state.virtualStart);
+  const end = Math.min(total, start + state.VIRTUAL_WINDOW);
+
+  // Spacers
+  const topSpacer = document.createElement('div');
+  topSpacer.style.height = `${start * H}px`;
+  topSpacer.style.flexShrink = '0';
+
+  const bottomSpacer = document.createElement('div');
+  bottomSpacer.style.height = `${(total - end) * H}px`;
+  bottomSpacer.style.flexShrink = '0';
+
+  els.thumbnailList.appendChild(topSpacer);
+  renderThumbRange(filtered, start, end);
+  els.thumbnailList.appendChild(bottomSpacer);
+
+  highlightActiveThumbnail();
+
+  // Re-attach scroll handler for virtual updates
+  _stripScrollHandler = _debounce(() => {
+    const scrollTop = els.thumbnailList.scrollTop;
+    const newStart = Math.max(0, Math.floor(scrollTop / H) - 10);
+    if (Math.abs(newStart - state.virtualStart) > 5) {
+      state.virtualStart = newStart;
+      _rerenderVirtualStrip();
+    }
+  }, 60);
+  els.thumbnailList.addEventListener('scroll', _stripScrollHandler, { passive: true });
+}
+
+function _rerenderVirtualStrip() {
+  const filtered = getFilteredImages();
+  const total = filtered.length;
+  const H = state.THUMB_ITEM_HEIGHT;
+  const start = Math.max(0, state.virtualStart);
+  const end = Math.min(total, start + state.VIRTUAL_WINDOW);
+
+  // Update spacer heights and only replace middle children
+  const children = els.thumbnailList.children;
+  if (children.length >= 2) {
+    children[0].style.height = `${start * H}px`;
+    children[children.length - 1].style.height = `${(total - end) * H}px`;
+  }
+
+  // Remove old thumb items (all except first and last spacer)
+  while (els.thumbnailList.children.length > 2) {
+    els.thumbnailList.removeChild(els.thumbnailList.children[1]);
+  }
+
+  renderThumbRange(filtered, start, end);
+
+  // Re-insert bottom spacer at end
+  const bottomSpacer = els.thumbnailList.lastChild;
+  // Move bottom spacer to end (it was before the newly inserted items)
+  els.thumbnailList.appendChild(bottomSpacer);
+
+  highlightActiveThumbnail();
+}
+
+function renderThumbRange(filtered, start, end) {
+  const frag = document.createDocumentFragment();
+
+  for (let filteredIdx = start; filteredIdx < end; filteredIdx++) {
+    const img = filtered[filteredIdx];
+
     const item = document.createElement('div');
     item.className = 'thumbnail-item' + (img.selected ? ' selected' : '');
-    item.dataset.fullPath = img.full_path;
     item.dataset.filteredIdx = filteredIdx;
 
-    // Thumbnail image using convertFileSrc for local file protocol
     const thumbImg = document.createElement('img');
     thumbImg.loading = 'lazy';
-    thumbImg.src = window.__TAURI__.core.convertFileSrc(img.full_path);
+    thumbImg.src = img.src;  // Use pre-computed URL
     thumbImg.alt = img.filename;
+    thumbImg.decoding = 'async';
 
-    // Selected badge
     const badge = document.createElement('div');
     badge.className = 'thumb-badge';
     badge.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>`;
 
-    // Name tooltip
     const nameEl = document.createElement('div');
     nameEl.className = 'thumb-name';
     nameEl.textContent = img.filename;
@@ -180,26 +289,51 @@ function renderThumbnailStrip() {
     item.appendChild(badge);
     item.appendChild(nameEl);
 
-    item.addEventListener('click', () => {
-      navigateToFilteredIndex(filteredIdx);
-    });
+    item.addEventListener('click', () => navigateToFilteredIndex(filteredIdx));
+    frag.appendChild(item);
+  }
 
-    els.thumbnailList.appendChild(item);
-  });
-
-  highlightActiveThumbnail();
+  // Insert before bottom spacer if it exists, else just append
+  const lastChild = els.thumbnailList.lastChild;
+  const isBottomSpacer = lastChild && lastChild.dataset && lastChild.dataset.isSpacer;
+  if (isBottomSpacer) {
+    els.thumbnailList.insertBefore(frag, lastChild);
+  } else {
+    els.thumbnailList.appendChild(frag);
+  }
 }
 
 function highlightActiveThumbnail() {
   const items = els.thumbnailList.querySelectorAll('.thumbnail-item');
-  items.forEach((item, i) => {
-    item.classList.toggle('active', i === state.currentIndex);
+  const filtered = getFilteredImages();
+  items.forEach(item => {
+    const idx = parseInt(item.dataset.filteredIdx, 10);
+    item.classList.toggle('active', idx === state.currentIndex);
   });
+}
 
-  // Scroll active thumbnail into view
-  const activeItem = els.thumbnailList.children[state.currentIndex];
-  if (activeItem) {
-    activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+function scrollThumbnailIntoView(filteredIdx) {
+  const filtered = getFilteredImages();
+  const total = filtered.length;
+  const H = state.THUMB_ITEM_HEIGHT;
+
+  // For virtual strip, scroll the container to show the item
+  const targetScrollTop = filteredIdx * H;
+  const listEl = els.thumbnailList;
+  const visibleTop = listEl.scrollTop;
+  const visibleBottom = visibleTop + listEl.clientHeight;
+
+  if (targetScrollTop < visibleTop || targetScrollTop + H > visibleBottom) {
+    listEl.scrollTo({ top: Math.max(0, targetScrollTop - listEl.clientHeight / 2), behavior: 'smooth' });
+  }
+
+  // Update virtual window if needed for large sets
+  if (total > state.VIRTUAL_WINDOW) {
+    const newStart = Math.max(0, filteredIdx - Math.floor(state.VIRTUAL_WINDOW / 2));
+    if (newStart !== state.virtualStart) {
+      state.virtualStart = newStart;
+      _rerenderVirtualStrip();
+    }
   }
 }
 
@@ -211,8 +345,7 @@ function updateStripCount() {
 }
 
 function updateThumbnailSelectedState(filteredIdx) {
-  const items = els.thumbnailList.querySelectorAll('.thumbnail-item');
-  const item = items[filteredIdx];
+  const item = els.thumbnailList.querySelector(`[data-filtered-idx="${filteredIdx}"]`);
   if (!item) return;
   const img = getFilteredImages()[filteredIdx];
   if (!img) return;
@@ -222,8 +355,11 @@ function updateThumbnailSelectedState(filteredIdx) {
 // ============================================================
 // IMAGE DISPLAY
 // ============================================================
+let _displayRafId = null;
+
 function displayImage(filteredIdx) {
   const filtered = getFilteredImages();
+
   if (filtered.length === 0) {
     els.mainImage.src = '';
     els.statusFilename.textContent = '—';
@@ -234,23 +370,27 @@ function displayImage(filteredIdx) {
     return;
   }
 
-  // Clamp index
   filteredIdx = Math.max(0, Math.min(filteredIdx, filtered.length - 1));
   state.currentIndex = filteredIdx;
 
   const img = filtered[filteredIdx];
 
-  // Load image
-  els.mainImage.classList.add('loading');
-  const newSrc = window.__TAURI__.core.convertFileSrc(img.full_path);
-  els.mainImage.onload = () => els.mainImage.classList.remove('loading');
-  els.mainImage.onerror = () => {
-    els.mainImage.classList.remove('loading');
-    showToast('Failed to load image: ' + img.filename);
-  };
-  els.mainImage.src = newSrc;
+  // Use pre-computed src URL — no repeated convertFileSrc calls
+  if (els.mainImage.src !== img.src) {
+    els.mainImage.classList.add('loading');
+    els.mainImage.onload = () => els.mainImage.classList.remove('loading');
+    els.mainImage.onerror = () => {
+      els.mainImage.classList.remove('loading');
+      showToast('Failed to load: ' + img.filename);
+    };
+    els.mainImage.src = img.src;
+  }
 
-  // Update status bar
+  // Preload neighbours immediately after paint
+  if (_displayRafId) cancelAnimationFrame(_displayRafId);
+  _displayRafId = requestAnimationFrame(() => preloadAdjacent(filteredIdx));
+
+  // Status bar
   els.statusFilename.textContent = img.filename;
   els.statusCounter.textContent = `${filteredIdx + 1} / ${filtered.length}`;
 
@@ -264,15 +404,14 @@ function displayImage(filteredIdx) {
     els.selectedOverlay.classList.remove('visible');
   }
 
-  // Selected count
   const selectedCount = state.images.filter(i => i.selected).length;
   els.statusSelectedCount.textContent = selectedCount > 0 ? `(${selectedCount} total selected)` : '';
 
-  // Nav buttons
   els.btnPrev.disabled = filteredIdx === 0;
   els.btnNext.disabled = filteredIdx === filtered.length - 1;
 
   highlightActiveThumbnail();
+  scrollThumbnailIntoView(filteredIdx);
 }
 
 // ============================================================
@@ -299,46 +438,34 @@ async function toggleSelect() {
   const currentImg = filtered[state.currentIndex];
   if (!currentImg) return;
 
-  // Find in master images array and toggle
   const masterIdx = state.images.findIndex(img => img.full_path === currentImg.full_path);
   if (masterIdx === -1) return;
 
   state.images[masterIdx].selected = !state.images[masterIdx].selected;
-
-  // Update the filtered image reference
   currentImg.selected = state.images[masterIdx].selected;
 
-  // Update UI
   displayImage(state.currentIndex);
   updateThumbnailSelectedState(state.currentIndex);
   updateStripCount();
   updateCompleteButton();
 
-  // Show brief feedback
   showToast(currentImg.selected ? `✓ ${currentImg.filename} selected` : `✗ ${currentImg.filename} deselected`);
 
-  // Auto-save selection to disk for crash recovery
+  // Auto-save (non-blocking)
   try {
     const selectedFilenames = state.images.filter(i => i.selected).map(i => i.filename);
     await invoke('save_selection', { dir: state.sourceDir, filenames: selectedFilenames });
-  } catch (_) {
-    // Non-critical, ignore
-  }
+  } catch (_) { }
 
-  // If filter is active, re-render strip after a short delay
   if (state.filter !== 'all') {
-    // Re-render strip for filtered views since item might need to hide/show
     setTimeout(() => {
       renderThumbnailStrip();
       updateStripCount();
-      // Adjust index if necessary
       const newFiltered = getFilteredImages();
       if (state.currentIndex >= newFiltered.length) {
         state.currentIndex = Math.max(0, newFiltered.length - 1);
       }
-      if (newFiltered.length > 0) {
-        displayImage(state.currentIndex);
-      }
+      if (newFiltered.length > 0) displayImage(state.currentIndex);
     }, 300);
   }
 }
@@ -349,15 +476,12 @@ async function toggleSelect() {
 function setFilter(mode) {
   state.filter = mode;
   state.currentIndex = 0;
+  state.virtualStart = 0;
   updateFilterButtons();
   renderThumbnailStrip();
   updateStripCount();
   const filtered = getFilteredImages();
-  if (filtered.length > 0) {
-    displayImage(0);
-  } else {
-    displayImage(-1);
-  }
+  displayImage(filtered.length > 0 ? 0 : -1);
 }
 
 function updateFilterButtons() {
@@ -376,7 +500,6 @@ async function completeSelection() {
     showModal('error', 'No Images Selected', 'Please select at least one image before completing the selection.');
     return;
   }
-
   if (!state.destDir) {
     showModal('error', 'No Destination', 'Please select a destination folder first.');
     return;
@@ -407,22 +530,9 @@ function updateCompleteButton() {
   const hasDest = !!state.destDir;
   els.btnComplete.disabled = !(hasImages && hasDest && selectedCount > 0);
 
-  // Update label
-  if (selectedCount > 0) {
-    els.btnComplete.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="20 6 9 17 4 12"/>
-      </svg>
-      Complete (${selectedCount})
-    `;
-  } else {
-    els.btnComplete.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="20 6 9 17 4 12"/>
-      </svg>
-      Complete Selection
-    `;
-  }
+  els.btnComplete.innerHTML = selectedCount > 0
+    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Complete (${selectedCount})`
+    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Complete Selection`;
 }
 
 // ============================================================
@@ -461,34 +571,39 @@ function getBasename(path) {
   return path.replace(/\\/g, '/').split('/').pop() || path;
 }
 
+// Debounce helper — coalesces rapid calls into one at the trailing edge
+function _debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
 // ============================================================
-// KEYBOARD SHORTCUTS
+// KEYBOARD SHORTCUTS  (debounced at 80ms — fast but coalescable)
 // ============================================================
+const _handleKey = _debounce((e) => {
+  if (state.images.length === 0) return;
+  switch (e.key) {
+    case 'ArrowRight': navigate(1); break;
+    case 'ArrowLeft': navigate(-1); break;
+    case 's': case 'S': toggleSelect(); break;
+  }
+}, 80);
+
 document.addEventListener('keydown', (e) => {
-  // Don't intercept when typing in inputs
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (state.images.length === 0) return;
 
-  switch (e.key) {
-    case 'ArrowRight':
-      e.preventDefault();
-      navigate(1);
-      break;
-    case 'ArrowLeft':
-      e.preventDefault();
-      navigate(-1);
-      break;
-    case 's':
-    case 'S':
-      e.preventDefault();
-      toggleSelect();
-      break;
-    case 'Escape':
-      e.preventDefault();
-      if (!els.modalOverlay.classList.contains('hidden')) {
-        closeModal();
-      }
-      break;
+  if (['ArrowRight', 'ArrowLeft', 's', 'S'].includes(e.key)) {
+    e.preventDefault();
+    _handleKey(e);
+  }
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (!els.modalOverlay.classList.contains('hidden')) closeModal();
   }
 });
 
@@ -500,20 +615,13 @@ els.btnDestDir.addEventListener('click', pickDestDir);
 els.btnWelcomeSource.addEventListener('click', pickSourceDir);
 els.btnComplete.addEventListener('click', completeSelection);
 els.modalClose.addEventListener('click', closeModal);
-els.modalOverlay.addEventListener('click', (e) => {
-  if (e.target === els.modalOverlay) closeModal();
-});
-
+els.modalOverlay.addEventListener('click', (e) => { if (e.target === els.modalOverlay) closeModal(); });
 els.btnPrev.addEventListener('click', () => navigate(-1));
 els.btnNext.addEventListener('click', () => navigate(1));
-
-els.filterBtns.forEach(btn => {
-  btn.addEventListener('click', () => setFilter(btn.dataset.filter));
-});
+els.filterBtns.forEach(btn => btn.addEventListener('click', () => setFilter(btn.dataset.filter)));
 
 // ============================================================
 // INIT
 // ============================================================
-// Show welcome state on startup
 els.welcomeState.classList.remove('hidden');
 els.viewerState.classList.add('hidden');

@@ -786,3 +786,20 @@ kbd {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ============================================================
+   PERFORMANCE ADDITIONS
+   ============================================================ */
+
+/* Empty state message inside thumbnail strip */
+.thumb-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* GPU compositing hint for smoother image transitions */
+#mainImage {
+  will-change: opacity;
+}
