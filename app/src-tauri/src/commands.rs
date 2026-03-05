@@ -47,7 +47,7 @@ fn is_supported_image(path: &Path) -> bool {
 /// so it never stalls the async Tauri runtime (important for 5000+ image folders).
 #[tauri::command]
 pub async fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<Vec<ImageInfo>, String> {
         let dir_path = Path::new(&dir);
         if !dir_path.exists() {
             return Err(format!("Directory does not exist: {}", dir));
@@ -88,7 +88,7 @@ pub async fn copy_files(
     files: Vec<String>,
     dest: String,
 ) -> Result<CopyResult, String> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<CopyResult, String> {
         let dest_path = Path::new(&dest);
 
         if !dest_path.exists() {
