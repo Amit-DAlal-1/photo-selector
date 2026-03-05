@@ -1,192 +1,231 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Photo Selector</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <!-- TOP TOOLBAR -->
-    <header class="toolbar" id="toolbar">
-      <div class="toolbar-left">
-        <div class="app-logo">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
-            <polyline points="21 15 16 10 5 21"/>
-          </svg>
-          <span>Photo Selector</span>
-        </div>
+<html lang="en" data-theme="light">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CherryPic</title>
+  <link rel="icon" type="image/png" href="cherrypic.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+
+  <!-- ============================================================
+         SPLASH SCREEN
+         ============================================================ -->
+  <div class="splash-screen" id="splashScreen">
+    <div class="splash-bg"></div>
+    <div class="splash-content">
+      <div class="splash-logo">
+        <img src="cherrypic.png" alt="CherryPic" class="splash-icon" />
       </div>
-
-      <div class="toolbar-center" id="filterBar">
-        <button class="filter-btn active" id="filterAll" data-filter="all">All</button>
-        <button class="filter-btn" id="filterSelected" data-filter="selected">Selected</button>
-        <button class="filter-btn" id="filterUnselected" data-filter="unselected">Unselected</button>
+      <h1 class="splash-title">CherryPic</h1>
+      <p class="splash-tagline">Fast, keyboard-driven photo shortlisting</p>
+      <div class="splash-loader">
+        <div class="splash-loader-bar"></div>
       </div>
+      <p class="splash-credit">By Dhull Shabh</p>
+    </div>
+  </div>
 
-      <div class="toolbar-right">
-        <div class="dir-pickers">
-          <button class="dir-btn" id="btnSourceDir" title="Select Source Folder">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            <span id="sourceDirLabel">Source Folder</span>
-          </button>
-          <div class="dir-separator">→</div>
-          <button class="dir-btn" id="btnDestDir" title="Select Destination Folder">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            <span id="destDirLabel">Destination Folder</span>
-          </button>
-        </div>
-        <button class="complete-btn" id="btnComplete" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
-          Complete Selection
-        </button>
-      </div>
-    </header>
-
-    <!-- MAIN CONTENT AREA -->
-    <main class="main-content" id="mainContent">
-
-      <!-- EMPTY / WELCOME STATE -->
-      <div class="welcome-state" id="welcomeState">
-        <div class="welcome-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
-            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
-            <polyline points="21 15 16 10 5 21"/>
-          </svg>
-        </div>
-        <h1>Photo Selector</h1>
-        <p>Fast keyboard-driven photo shortlisting</p>
-        <div class="welcome-steps">
-          <div class="step">
-            <span class="step-num">1</span>
-            <span>Select your <strong>Source Folder</strong></span>
-          </div>
-          <div class="step">
-            <span class="step-num">2</span>
-            <span>Select a <strong>Destination Folder</strong></span>
-          </div>
-          <div class="step">
-            <span class="step-num">3</span>
-            <span>Browse with <kbd>←</kbd> <kbd>→</kbd>, select with <kbd>S</kbd></span>
-          </div>
-        </div>
-        <div class="welcome-actions">
-          <button class="welcome-btn primary" id="btnWelcomeSource">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            Select Source Folder
-          </button>
-        </div>
-      </div>
-
-      <!-- VIEWER STATE (shown after images loaded) -->
-      <div class="viewer-state hidden" id="viewerState">
-
-        <!-- LEFT: THUMBNAIL STRIP -->
-        <aside class="thumbnail-strip" id="thumbnailStrip">
-          <div class="strip-header">
-            <span id="stripCount">0 images</span>
-          </div>
-          <div class="thumbnail-list" id="thumbnailList">
-            <!-- Thumbnails injected by JS -->
-          </div>
-        </aside>
-
-        <!-- RIGHT: MAIN VIEWER -->
-        <section class="viewer-section" id="viewerSection">
-          <div class="image-container" id="imageContainer">
-            <img id="mainImage" src="" alt="Current image" draggable="false" />
-            <div class="selected-overlay" id="selectedOverlay">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
-              <span>SELECTED</span>
-            </div>
-          </div>
-        </section>
-
-      </div>
-
-    </main>
-
-    <!-- BOTTOM STATUS BAR -->
-    <footer class="status-bar" id="statusBar">
-      <div class="status-left">
-        <span class="status-filename" id="statusFilename">—</span>
-      </div>
-      <div class="status-center">
-        <button class="nav-btn" id="btnPrev" title="Previous (←)" disabled>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="15 18 9 12 15 6"/>
-          </svg>
-        </button>
-        <span class="status-counter" id="statusCounter">— / —</span>
-        <button class="nav-btn" id="btnNext" title="Next (→)" disabled>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-        </button>
-      </div>
-      <div class="status-right">
-        <span class="status-selection" id="statusSelection">—</span>
-        <span class="status-selected-count" id="statusSelectedCount"></span>
-        <div class="shortcut-hints">
-          <kbd>←</kbd> Prev
-          <kbd>→</kbd> Next
-          <kbd>S</kbd> Select
-        </div>
-      </div>
-    </footer>
-
-    <!-- MODAL: Copy Progress / Result -->
-    <div class="modal-overlay hidden" id="modalOverlay">
-      <div class="modal" id="modal">
-        <!-- Progress state (shown while copying) -->
-        <div class="copy-progress-panel hidden" id="copyProgressPanel">
-          <div class="copy-progress-icon">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin">
-              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-            </svg>
-          </div>
-          <h2 class="modal-title">Copying…</h2>
-          <p class="copy-progress-file" id="copyProgressFile">Preparing…</p>
-          <div class="copy-progress-bar-track">
-            <div class="copy-progress-bar-fill" id="copyProgressFill"></div>
-          </div>
-          <p class="copy-progress-counter" id="copyProgressCounter">0 / 0</p>
-        </div>
-
-        <!-- Result state (shown after copying) -->
-        <div class="copy-result-panel" id="copyResultPanel">
-          <div class="modal-icon" id="modalIcon">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-          </div>
-          <h2 class="modal-title" id="modalTitle">Complete!</h2>
-          <p class="modal-message" id="modalMessage"></p>
-          <div class="modal-actions">
-            <button class="modal-btn" id="modalClose">Done</button>
-          </div>
-        </div>
+  <!-- TOP TOOLBAR -->
+  <header class="toolbar" id="toolbar">
+    <div class="toolbar-left">
+      <div class="app-logo">
+        <img src="cherrypic.png" alt="CherryPic" class="app-logo-img" />
+        <span>CherryPic</span>
       </div>
     </div>
 
+    <div class="toolbar-center" id="filterBar">
+      <button class="filter-btn active" id="filterAll" data-filter="all">All</button>
+      <button class="filter-btn" id="filterSelected" data-filter="selected">Selected</button>
+      <button class="filter-btn" id="filterUnselected" data-filter="unselected">Unselected</button>
+    </div>
 
-    <!-- TOAST NOTIFICATION -->
-    <div class="toast" id="toast"></div>
+    <div class="toolbar-right">
+      <div class="dir-pickers">
+        <button class="dir-btn" id="btnSourceDir" title="Select Source Folder">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          <span id="sourceDirLabel">Source Folder</span>
+        </button>
+        <div class="dir-separator">→</div>
+        <button class="dir-btn" id="btnDestDir" title="Select Destination Folder">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          <span id="destDirLabel">Destination Folder</span>
+        </button>
+      </div>
+      <button class="complete-btn" id="btnComplete" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        Complete Selection
+      </button>
 
-    <script type="module" src="main.js"></script>
-  </body>
+      <!-- Theme Toggle -->
+      <button class="theme-toggle" id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle theme">
+        <!-- Moon icon (shown in light mode to switch to dark) -->
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+        <!-- Sun icon (shown in dark mode to switch to light) -->
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <circle cx="12" cy="12" r="5" />
+          <line x1="12" y1="1" x2="12" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="23" />
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+          <line x1="1" y1="12" x2="3" y2="12" />
+          <line x1="21" y1="12" x2="23" y2="12" />
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN CONTENT AREA -->
+  <main class="main-content" id="mainContent">
+
+    <!-- EMPTY / WELCOME STATE -->
+    <div class="welcome-state" id="welcomeState">
+      <div class="welcome-icon">
+        <img src="cherrypic.png" alt="CherryPic" class="welcome-logo-img" />
+      </div>
+      <h1>CherryPic</h1>
+      <p>Fast keyboard-driven photo shortlisting</p>
+      <div class="welcome-steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <span>Select your <strong>Source Folder</strong></span>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span>Select a <strong>Destination Folder</strong></span>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span>Browse with <kbd>←</kbd> <kbd>→</kbd>, select with <kbd>S</kbd></span>
+        </div>
+      </div>
+      <div class="welcome-actions">
+        <button class="welcome-btn primary" id="btnWelcomeSource">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          Select Source Folder
+        </button>
+      </div>
+    </div>
+
+    <!-- VIEWER STATE (shown after images loaded) -->
+    <div class="viewer-state hidden" id="viewerState">
+
+      <!-- LEFT: THUMBNAIL STRIP -->
+      <aside class="thumbnail-strip" id="thumbnailStrip">
+        <div class="strip-header">
+          <span id="stripCount">0 images</span>
+        </div>
+        <div class="thumbnail-list" id="thumbnailList">
+          <!-- Thumbnails injected by JS -->
+        </div>
+      </aside>
+
+      <!-- RIGHT: MAIN VIEWER -->
+      <section class="viewer-section" id="viewerSection">
+        <div class="image-container" id="imageContainer">
+          <img id="mainImage" src="" alt="Current image" draggable="false" />
+          <div class="selected-overlay" id="selectedOverlay">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            <span>SELECTED</span>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+  </main>
+
+  <!-- BOTTOM STATUS BAR -->
+  <footer class="status-bar" id="statusBar">
+    <div class="status-left">
+      <span class="status-filename" id="statusFilename">—</span>
+    </div>
+    <div class="status-center">
+      <button class="nav-btn" id="btnPrev" title="Previous (←)" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
+      <span class="status-counter" id="statusCounter">— / —</span>
+      <button class="nav-btn" id="btnNext" title="Next (→)" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+    </div>
+    <div class="status-right">
+      <span class="status-selection" id="statusSelection">—</span>
+      <span class="status-selected-count" id="statusSelectedCount"></span>
+      <div class="shortcut-hints">
+        <kbd>←</kbd> Prev
+        <kbd>→</kbd> Next
+        <kbd>S</kbd> Select
+      </div>
+    </div>
+  </footer>
+
+  <!-- MODAL: Copy Progress / Result -->
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal" id="modal">
+      <!-- Progress state (shown while copying) -->
+      <div class="copy-progress-panel hidden" id="copyProgressPanel">
+        <div class="copy-progress-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            class="spin">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+          </svg>
+        </div>
+        <h2 class="modal-title">Copying…</h2>
+        <p class="copy-progress-file" id="copyProgressFile">Preparing…</p>
+        <div class="copy-progress-bar-track">
+          <div class="copy-progress-bar-fill" id="copyProgressFill"></div>
+        </div>
+        <p class="copy-progress-counter" id="copyProgressCounter">0 / 0</p>
+      </div>
+
+      <!-- Result state (shown after copying) -->
+      <div class="copy-result-panel" id="copyResultPanel">
+        <div class="modal-icon" id="modalIcon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        </div>
+        <h2 class="modal-title" id="modalTitle">Complete!</h2>
+        <p class="modal-message" id="modalMessage"></p>
+        <div class="modal-actions">
+          <button class="modal-btn" id="modalClose">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="main.js"></script>
+</body>
+
 </html>

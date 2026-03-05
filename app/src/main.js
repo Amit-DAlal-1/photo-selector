@@ -654,8 +654,35 @@ els.btnPrev.addEventListener('click', () => navigate(-1));
 els.btnNext.addEventListener('click', () => navigate(1));
 els.filterBtns.forEach(btn => btn.addEventListener('click', () => setFilter(btn.dataset.filter)));
 
+// Theme toggle
+const themeToggleBtn = document.getElementById('themeToggle');
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('cherrypic-theme', theme);
+}
+themeToggleBtn.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-theme');
+  applyTheme(current === 'dark' ? 'light' : 'dark');
+});
+
 // ============================================================
 // INIT
 // ============================================================
+
+// Restore saved theme (default = light)
+const savedTheme = localStorage.getItem('cherrypic-theme') || 'light';
+applyTheme(savedTheme);
+
+// Show welcome
 els.welcomeState.classList.remove('hidden');
 els.viewerState.classList.add('hidden');
+
+// Splash screen (auto-dismiss after 2.2s)
+const splash = document.getElementById('splashScreen');
+if (splash) {
+  setTimeout(() => {
+    splash.classList.add('splash-hiding');
+    splash.addEventListener('transitionend', () => splash.remove(), { once: true });
+  }, 2000);
+}
+
