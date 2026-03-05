@@ -1,8 +1,8 @@
 [package]
-name = "photo-selector"
+name = "cherrypic"
 version = "0.1.0"
 description = "Photo Shortlisting App"
-authors = ["Photo Selector"]
+authors = ["CherryPic"]
 edition = "2021"
 
 [lib]
