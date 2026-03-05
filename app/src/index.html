@@ -152,18 +152,37 @@
     <!-- MODAL: Copy Progress / Result -->
     <div class="modal-overlay hidden" id="modalOverlay">
       <div class="modal" id="modal">
-        <div class="modal-icon" id="modalIcon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
+        <!-- Progress state (shown while copying) -->
+        <div class="copy-progress-panel hidden" id="copyProgressPanel">
+          <div class="copy-progress-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+            </svg>
+          </div>
+          <h2 class="modal-title">Copying…</h2>
+          <p class="copy-progress-file" id="copyProgressFile">Preparing…</p>
+          <div class="copy-progress-bar-track">
+            <div class="copy-progress-bar-fill" id="copyProgressFill"></div>
+          </div>
+          <p class="copy-progress-counter" id="copyProgressCounter">0 / 0</p>
         </div>
-        <h2 class="modal-title" id="modalTitle">Complete!</h2>
-        <p class="modal-message" id="modalMessage"></p>
-        <div class="modal-actions">
-          <button class="modal-btn" id="modalClose">Done</button>
+
+        <!-- Result state (shown after copying) -->
+        <div class="copy-result-panel" id="copyResultPanel">
+          <div class="modal-icon" id="modalIcon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </div>
+          <h2 class="modal-title" id="modalTitle">Complete!</h2>
+          <p class="modal-message" id="modalMessage"></p>
+          <div class="modal-actions">
+            <button class="modal-btn" id="modalClose">Done</button>
+          </div>
         </div>
       </div>
     </div>
+
 
     <!-- TOAST NOTIFICATION -->
     <div class="toast" id="toast"></div>

@@ -2,11 +2,13 @@
  * Photo Selector — Main Application Logic
  * A fast keyboard-driven photo shortlisting tool built with Tauri.
  * Performance optimised: URL caching, image preloading, nav debouncing, virtual thumbnail strip.
+ * Async Rust commands: spawn_blocking for scan + copy with real-time progress events.
  */
 
 const { invoke } = window.__TAURI__.core;
 const { open: dialogOpen } = window.__TAURI__.dialog;
 const { convertFileSrc } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 // ============================================================
 // APPLICATION STATE
@@ -54,12 +56,21 @@ const els = {
   statusSelection: document.getElementById('statusSelection'),
   statusSelectedCount: document.getElementById('statusSelectedCount'),
   btnPrev: document.getElementById('btnPrev'),
-  btnNext: document.getElementById('btnNext'),
+  btnNext: document.getElementById('btnNext'),  // Modal — result panel
   modalOverlay: document.getElementById('modalOverlay'),
   modalIcon: document.getElementById('modalIcon'),
   modalTitle: document.getElementById('modalTitle'),
   modalMessage: document.getElementById('modalMessage'),
   modalClose: document.getElementById('modalClose'),
+  copyResultPanel: document.getElementById('copyResultPanel'),
+
+  // Modal — progress panel
+  copyProgressPanel: document.getElementById('copyProgressPanel'),
+  copyProgressFile: document.getElementById('copyProgressFile'),
+  copyProgressFill: document.getElementById('copyProgressFill'),
+  copyProgressCounter: document.getElementById('copyProgressCounter'),
+
+  // Toast
   toast: document.getElementById('toast'),
 };
 
@@ -506,7 +517,15 @@ async function completeSelection() {
   }
 
   els.btnComplete.disabled = true;
-  els.btnComplete.textContent = 'Copying…';
+
+  // Show the progress panel immediately
+  showCopyProgress(0, selected.length, 'Preparing…');
+
+  // Subscribe to per-file progress events from Rust
+  const unlisten = await listen('copy-progress', (event) => {
+    const { current, total, filename } = event.payload;
+    showCopyProgress(current, total, filename);
+  });
 
   try {
     const filePaths = selected.map(img => img.full_path);
@@ -520,8 +539,21 @@ async function completeSelection() {
   } catch (e) {
     showModal('error', 'Copy Failed', String(e));
   } finally {
+    unlisten(); // stop listening
     updateCompleteButton();
   }
+}
+
+/** Shows the copy-in-progress panel inside the modal */
+function showCopyProgress(current, total, filename) {
+  els.modalOverlay.classList.remove('hidden');
+  els.copyProgressPanel.classList.remove('hidden');
+  els.copyResultPanel.classList.add('hidden');
+
+  const pct = total > 0 ? (current / total) * 100 : 0;
+  els.copyProgressFill.style.width = pct + '%';
+  els.copyProgressCounter.textContent = `${current} / ${total}`;
+  els.copyProgressFile.textContent = filename;
 }
 
 function updateCompleteButton() {
@@ -539,6 +571,10 @@ function updateCompleteButton() {
 // MODAL
 // ============================================================
 function showModal(type, title, message) {
+  // Switch to result panel (hide progress panel)
+  els.copyProgressPanel.classList.add('hidden');
+  els.copyResultPanel.classList.remove('hidden');
+
   const isSuccess = type === 'success';
   els.modalIcon.className = 'modal-icon' + (isSuccess ? '' : ' error');
   els.modalIcon.innerHTML = isSuccess
@@ -551,6 +587,9 @@ function showModal(type, title, message) {
 
 function closeModal() {
   els.modalOverlay.classList.add('hidden');
+  // Reset for next use
+  els.copyProgressPanel.classList.add('hidden');
+  els.copyResultPanel.classList.remove('hidden');
 }
 
 // ============================================================

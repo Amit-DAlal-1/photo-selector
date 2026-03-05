@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use tauri::AppHandle;
+use tauri::Emitter;
 use walkdir::WalkDir;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,6 +23,13 @@ pub struct SelectionFile {
     pub selected_images: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CopyProgress {
+    pub current: usize,
+    pub total: usize,
+    pub filename: String,
+}
+
 fn is_supported_image(path: &Path) -> bool {
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
@@ -33,96 +42,133 @@ fn is_supported_image(path: &Path) -> bool {
     }
 }
 
+/// Scans a directory for supported images.
+/// Runs the blocking walkdir scan on a dedicated thread pool via spawn_blocking
+/// so it never stalls the async Tauri runtime (important for 5000+ image folders).
 #[tauri::command]
-pub fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
-    let dir_path = Path::new(&dir);
-    if !dir_path.exists() {
-        return Err(format!("Directory does not exist: {}", dir));
-    }
-    if !dir_path.is_dir() {
-        return Err(format!("Path is not a directory: {}", dir));
-    }
+pub async fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        let dir_path = Path::new(&dir);
+        if !dir_path.exists() {
+            return Err(format!("Directory does not exist: {}", dir));
+        }
+        if !dir_path.is_dir() {
+            return Err(format!("Path is not a directory: {}", dir));
+        }
 
-    let mut images: Vec<ImageInfo> = WalkDir::new(&dir)
-        .min_depth(1)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && is_supported_image(e.path()))
-        .map(|e| ImageInfo {
-            filename: e.file_name().to_string_lossy().to_string(),
-            full_path: e.path().to_string_lossy().to_string(),
-        })
-        .collect();
+        let mut images: Vec<ImageInfo> = WalkDir::new(&dir)
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() && is_supported_image(e.path()))
+            .map(|e| ImageInfo {
+                filename: e.file_name().to_string_lossy().to_string(),
+                full_path: e.path().to_string_lossy().to_string(),
+            })
+            .collect();
 
-    if images.is_empty() {
-        return Err("No supported images found in directory".to_string());
-    }
+        if images.is_empty() {
+            return Err("No supported images found in directory".to_string());
+        }
 
-    // Sort alphabetically by filename
-    images.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
-
-    Ok(images)
+        images.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+        Ok(images)
+    })
+    .await
+    .map_err(|e| format!("Scan error: {}", e))?
 }
 
+/// Copies selected files to the destination directory.
+/// Runs on a thread pool (spawn_blocking) and emits a `copy-progress` Tauri event
+/// after each file so the frontend can display a real-time progress bar.
 #[tauri::command]
-pub fn copy_files(files: Vec<String>, dest: String) -> Result<CopyResult, String> {
-    let dest_path = Path::new(&dest);
+pub async fn copy_files(
+    app: AppHandle,
+    files: Vec<String>,
+    dest: String,
+) -> Result<CopyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let dest_path = Path::new(&dest);
 
-    if !dest_path.exists() {
-        fs::create_dir_all(&dest_path)
-            .map_err(|e| format!("Cannot create destination directory: {}", e))?;
-    }
-
-    // Check writable by trying to write a temp file
-    let test_file = dest_path.join(".write_test");
-    fs::write(&test_file, "").map_err(|_| "Destination directory is not writable".to_string())?;
-    let _ = fs::remove_file(&test_file);
-
-    let mut result = CopyResult {
-        copied: 0,
-        skipped: 0,
-        errors: vec![],
-    };
-
-    for src_path_str in &files {
-        let src_path = Path::new(src_path_str);
-        if !src_path.exists() {
-            result.errors.push(format!("Source not found: {}", src_path_str));
-            continue;
+        if !dest_path.exists() {
+            fs::create_dir_all(dest_path)
+                .map_err(|e| format!("Cannot create destination directory: {}", e))?;
         }
 
-        let filename = match src_path.file_name() {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => {
-                result.errors.push(format!("Invalid filename: {}", src_path_str));
-                continue;
-            }
+        // Check writable
+        let test_file = dest_path.join(".write_test");
+        fs::write(&test_file, "")
+            .map_err(|_| "Destination directory is not writable".to_string())?;
+        let _ = fs::remove_file(&test_file);
+
+        let total = files.len();
+        let mut result = CopyResult {
+            copied: 0,
+            skipped: 0,
+            errors: vec![],
         };
 
-        // Determine destination path, rename on conflict
-        let mut dest_file = dest_path.join(&filename);
-        if dest_file.exists() {
-            let stem = src_path.file_stem().unwrap_or_default().to_string_lossy();
-            let ext = src_path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-            let mut counter = 1u32;
-            loop {
-                let new_name = format!("{}_{}{}", stem, counter, ext);
-                dest_file = dest_path.join(&new_name);
-                if !dest_file.exists() {
-                    break;
+        for (i, src_path_str) in files.iter().enumerate() {
+            let src_path = Path::new(src_path_str);
+
+            let filename = match src_path.file_name() {
+                Some(n) => n.to_string_lossy().to_string(),
+                None => {
+                    result.errors.push(format!("Invalid filename: {}", src_path_str));
+                    continue;
                 }
-                counter += 1;
+            };
+
+            // Emit progress event BEFORE copying so the UI updates immediately
+            let _ = app.emit(
+                "copy-progress",
+                CopyProgress {
+                    current: i + 1,
+                    total,
+                    filename: filename.clone(),
+                },
+            );
+
+            if !src_path.exists() {
+                result.errors.push(format!("Source not found: {}", src_path_str));
+                continue;
+            }
+
+            // Rename on conflict
+            let mut dest_file = dest_path.join(&filename);
+            if dest_file.exists() {
+                let stem = src_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let ext = src_path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                let mut counter = 1u32;
+                loop {
+                    let new_name = format!("{}_{}{}", stem, counter, ext);
+                    dest_file = dest_path.join(&new_name);
+                    if !dest_file.exists() {
+                        break;
+                    }
+                    counter += 1;
+                }
+            }
+
+            match fs::copy(src_path, &dest_file) {
+                Ok(_) => result.copied += 1,
+                Err(e) => result
+                    .errors
+                    .push(format!("Failed to copy {}: {}", filename, e)),
             }
         }
 
-        match fs::copy(src_path, &dest_file) {
-            Ok(_) => result.copied += 1,
-            Err(e) => result.errors.push(format!("Failed to copy {}: {}", filename, e)),
-        }
-    }
-
-    Ok(result)
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("Copy error: {}", e))?
 }
 
 #[tauri::command]
