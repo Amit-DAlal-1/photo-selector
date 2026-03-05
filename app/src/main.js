@@ -327,16 +327,11 @@ function scrollThumbnailIntoView(filteredIdx) {
   const filtered = getFilteredImages();
   const total = filtered.length;
   const H = state.THUMB_ITEM_HEIGHT;
-
-  // For virtual strip, scroll the container to show the item
-  const targetScrollTop = filteredIdx * H;
   const listEl = els.thumbnailList;
-  const visibleTop = listEl.scrollTop;
-  const visibleBottom = visibleTop + listEl.clientHeight;
 
-  if (targetScrollTop < visibleTop || targetScrollTop + H > visibleBottom) {
-    listEl.scrollTo({ top: Math.max(0, targetScrollTop - listEl.clientHeight / 2), behavior: 'smooth' });
-  }
+  // Always center the active thumbnail in the visible strip panel
+  const targetScrollTop = Math.max(0, filteredIdx * H - (listEl.clientHeight / 2) + (H / 2));
+  listEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
 
   // Update virtual window if needed for large sets
   if (total > state.VIRTUAL_WINDOW) {
