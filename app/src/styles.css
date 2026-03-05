@@ -977,10 +977,9 @@ kbd {
 }
 
 .splash-icon {
-  width: 140px;
-  height: 140px;
+  width: 200px;
+  height: 200px;
   object-fit: contain;
-  drop-shadow: drop-shadow(0 12px 40px rgba(0, 0, 0, 0.4));
   filter: drop-shadow(0 8px 32px rgba(0, 0, 0, 0.35));
   animation: splashBounce 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) 0.2s both;
 }
@@ -1091,17 +1090,17 @@ kbd {
    APP LOGO IMAGE
    ============================================================ */
 .app-logo-img {
-  width: 24px;
-  height: 24px;
+  width: 36px;
+  height: 36px;
   object-fit: contain;
-  border-radius: 5px;
+  border-radius: 8px;
 }
 
 .welcome-logo-img {
-  width: 96px;
-  height: 96px;
+  width: 160px;
+  height: 160px;
   object-fit: contain;
-  filter: drop-shadow(0 4px 20px var(--accent-glow));
+  filter: drop-shadow(0 6px 24px var(--accent-glow));
 }
 
 /* Light mode: give viewer section a subtle pattern feel */
