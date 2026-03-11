@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "npx tauri dev",
     "build": "npx tauri build",
-    "tauri": "npx tauri"
+    "tauri": "npx tauri",
+    "perf:check": "node scripts/perf-guard.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

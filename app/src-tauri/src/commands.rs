@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use tauri::AppHandle;
@@ -42,6 +43,32 @@ fn is_supported_image(path: &Path) -> bool {
     }
 }
 
+fn reserve_dest_name(filename: &str, used_names: &mut HashSet<String>) -> String {
+    if used_names.insert(filename.to_string()) {
+        return filename.to_string();
+    }
+
+    let name_path = Path::new(filename);
+    let stem = name_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = name_path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut counter = 1u32;
+    loop {
+        let candidate = format!("{}_{}{}", stem, counter, ext);
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 /// Scans a directory for supported images.
 /// Runs the blocking walkdir scan on a dedicated thread pool via spawn_blocking
 /// so it never stalls the async Tauri runtime (important for 5000+ image folders).
@@ -72,7 +99,7 @@ pub async fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
             return Err("No supported images found in directory".to_string());
         }
 
-        images.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+        images.sort_by_cached_key(|img| img.filename.to_ascii_lowercase());
         Ok(images)
     })
     .await
@@ -109,6 +136,16 @@ pub async fn copy_files(
             errors: vec![],
         };
 
+        let mut used_names: HashSet<String> = HashSet::new();
+        if let Ok(entries) = fs::read_dir(dest_path) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                if let Some(name) = file_name.to_str() {
+                    used_names.insert(name.to_string());
+                }
+            }
+        }
+
         for (i, src_path_str) in files.iter().enumerate() {
             let src_path = Path::new(src_path_str);
 
@@ -135,27 +172,8 @@ pub async fn copy_files(
                 continue;
             }
 
-            // Rename on conflict
-            let mut dest_file = dest_path.join(&filename);
-            if dest_file.exists() {
-                let stem = src_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let ext = src_path
-                    .extension()
-                    .map(|e| format!(".{}", e.to_string_lossy()))
-                    .unwrap_or_default();
-                let mut counter = 1u32;
-                loop {
-                    let new_name = format!("{}_{}{}", stem, counter, ext);
-                    dest_file = dest_path.join(&new_name);
-                    if !dest_file.exists() {
-                        break;
-                    }
-                    counter += 1;
-                }
-            }
+            let reserved_name = reserve_dest_name(&filename, &mut used_names);
+            let dest_file = dest_path.join(&reserved_name);
 
             match fs::copy(src_path, &dest_file) {
                 Ok(_) => result.copied += 1,
@@ -172,26 +190,34 @@ pub async fn copy_files(
 }
 
 #[tauri::command]
-pub fn save_selection(dir: String, filenames: Vec<String>) -> Result<(), String> {
-    let selection = SelectionFile {
-        selected_images: filenames,
-    };
-    let json = serde_json::to_string_pretty(&selection)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    let path = Path::new(&dir).join("selection.json");
-    fs::write(&path, json).map_err(|e| format!("Failed to write selection.json: {}", e))?;
-    Ok(())
+pub async fn save_selection(dir: String, filenames: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let selection = SelectionFile {
+            selected_images: filenames,
+        };
+        let json = serde_json::to_string_pretty(&selection)
+            .map_err(|e| format!("Serialization error: {}", e))?;
+        let path = Path::new(&dir).join("selection.json");
+        fs::write(&path, json).map_err(|e| format!("Failed to write selection.json: {}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Save selection task failed: {}", e))?
 }
 
 #[tauri::command]
-pub fn load_selection(dir: String) -> Result<Vec<String>, String> {
-    let path = Path::new(&dir).join("selection.json");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read selection.json: {}", e))?;
-    let selection: SelectionFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse selection.json: {}", e))?;
-    Ok(selection.selected_images)
+pub async fn load_selection(dir: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&dir).join("selection.json");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read selection.json: {}", e))?;
+        let selection: SelectionFile = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse selection.json: {}", e))?;
+        Ok(selection.selected_images)
+    })
+    .await
+    .map_err(|e| format!("Load selection task failed: {}", e))?
 }

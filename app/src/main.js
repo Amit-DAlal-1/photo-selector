@@ -1,7 +1,7 @@
 /**
  * Photo Selector — Main Application Logic
  * A fast keyboard-driven photo shortlisting tool built with Tauri.
- * Performance optimised: URL caching, image preloading, nav debouncing, virtual thumbnail strip.
+ * Performance optimised: lazy URL caching, bounded preloading, frame-throttled nav, virtual thumbnail strip.
  * Async Rust commands: spawn_blocking for scan + copy with real-time progress events.
  */
 
@@ -14,7 +14,12 @@ const { listen } = window.__TAURI__.event;
 // APPLICATION STATE
 // ============================================================
 const state = {
-  images: [],           // Array of { filename, full_path, selected, src }
+  images: [],           // Array of { filename, full_path, selected, src? }
+  pathToIndex: new Map(), // full_path -> index in state.images
+  filteredImages: [],   // Derived cache for current filter
+  selectedImages: [],   // Derived selected image objects
+  selectedFilenames: [], // Derived selected image filenames
+  selectedCount: 0,     // Derived selected image count
   currentIndex: -1,     // Index into filtered view
   filter: 'all',        // 'all' | 'selected' | 'unselected'
   sourceDir: null,
@@ -22,16 +27,46 @@ const state = {
   // Virtual scroll state
   virtualStart: 0,      // First rendered thumbnail index
   VIRTUAL_WINDOW: 60,   // How many thumbnails to render at once
-  THUMB_ITEM_HEIGHT: 151, // px per thumbnail item: ~147px content (4/3 aspect at 196px width) + 4px gap
+  THUMB_ITEM_HEIGHT: 151, // px per thumbnail item (calibrated at runtime)
+  PRELOAD_CACHE_LIMIT: 220,
 };
 
 // Derived: filteredImages based on current filter
 function getFilteredImages() {
-  switch (state.filter) {
-    case 'selected': return state.images.filter(img => img.selected);
-    case 'unselected': return state.images.filter(img => !img.selected);
-    default: return state.images;
+  return state.filteredImages;
+}
+
+function recomputeDerivedState() {
+  const filtered = [];
+  const selectedImages = [];
+  const selectedFilenames = [];
+  let selectedCount = 0;
+
+  for (const img of state.images) {
+    if (img.selected) {
+      selectedCount += 1;
+      selectedImages.push(img);
+      selectedFilenames.push(img.filename);
+    }
+
+    if (state.filter === 'all') {
+      filtered.push(img);
+    } else if (state.filter === 'selected') {
+      if (img.selected) filtered.push(img);
+    } else if (!img.selected) {
+      filtered.push(img);
+    }
   }
+
+  state.filteredImages = filtered;
+  state.selectedImages = selectedImages;
+  state.selectedFilenames = selectedFilenames;
+  state.selectedCount = selectedCount;
+}
+
+function ensureImageSrc(img) {
+  if (!img.src) img.src = convertFileSrc(img.full_path);
+  return img.src;
 }
 
 // ============================================================
@@ -79,12 +114,37 @@ const els = {
 // ============================================================
 // Keyed by full_path → HTMLImageElement (warm browser cache)
 const preloadCache = new Map();
+const preloadFailures = new Set();
+
+function touchPreloadCache(key, value) {
+  if (preloadCache.has(key)) preloadCache.delete(key);
+  preloadCache.set(key, value);
+
+  while (preloadCache.size > state.PRELOAD_CACHE_LIMIT) {
+    const oldestKey = preloadCache.keys().next().value;
+    preloadCache.delete(oldestKey);
+  }
+}
 
 function preloadImage(img) {
-  if (!img || preloadCache.has(img.full_path)) return;
+  if (!img) return;
+
+  const key = img.full_path;
+  if (preloadFailures.has(key)) return;
+
+  if (preloadCache.has(key)) {
+    touchPreloadCache(key, preloadCache.get(key));
+    return;
+  }
+
   const el = new Image();
-  el.src = img.src;
-  preloadCache.set(img.full_path, el);
+  el.decoding = 'async';
+  el.onerror = () => {
+    preloadFailures.add(key);
+    preloadCache.delete(key);
+  };
+  el.src = ensureImageSrc(img);
+  touchPreloadCache(key, el);
 }
 
 function preloadAdjacent(filteredIdx) {
@@ -141,16 +201,20 @@ async function loadImages() {
     try { previousSelection = await invoke('load_selection', { dir: state.sourceDir }); } catch (_) { }
     const prevSet = new Set(previousSelection);
 
-    // Pre-compute convertFileSrc for every image ONCE — avoids repeated calls per render
+    // Keep source URLs lazy to reduce initial load cost on large folders
     state.images = rawImages.map(img => ({
       ...img,
       selected: prevSet.has(img.filename),
-      src: convertFileSrc(img.full_path),  // cached URL
+      src: null,
     }));
+    state.pathToIndex.clear();
+    state.images.forEach((img, idx) => state.pathToIndex.set(img.full_path, idx));
 
     preloadCache.clear();
-    state.currentIndex = 0;
+    preloadFailures.clear();
     state.filter = 'all';
+    recomputeDerivedState();
+    state.currentIndex = 0;
     state.virtualStart = 0;
     updateFilterButtons();
 
@@ -164,7 +228,7 @@ async function loadImages() {
 
     // Kick off background preload of first few images
     const filtered = getFilteredImages();
-    for (let i = 0; i < Math.min(5, filtered.length); i++) preloadImage(filtered[i]);
+    for (let i = 0; i < Math.min(8, filtered.length); i++) preloadImage(filtered[i]);
 
   } catch (e) {
     showModal('error', 'No Images Found', String(e));
@@ -178,6 +242,35 @@ async function loadImages() {
 // A top/bottom spacer div pushes the scrollbar to show correct total height.
 
 let _stripScrollHandler = null;
+let _thumbCalibrateRaf = null;
+let _activeThumbEl = null;
+
+function updateVirtualWindowSize() {
+  if (!els.thumbnailList || state.THUMB_ITEM_HEIGHT <= 0) return;
+
+  const listHeight = els.thumbnailList.clientHeight;
+  if (listHeight <= 0) return;
+
+  const visibleRows = Math.max(1, Math.ceil(listHeight / state.THUMB_ITEM_HEIGHT));
+  const desiredWindow = Math.max(48, visibleRows * 5);
+  state.VIRTUAL_WINDOW = desiredWindow;
+}
+
+function scheduleThumbHeightCalibration() {
+  if (_thumbCalibrateRaf) cancelAnimationFrame(_thumbCalibrateRaf);
+
+  _thumbCalibrateRaf = requestAnimationFrame(() => {
+    _thumbCalibrateRaf = null;
+    const firstItem = els.thumbnailList.querySelector('.thumbnail-item');
+    if (!firstItem) return;
+
+    const style = window.getComputedStyle(els.thumbnailList);
+    const gap = parseFloat(style.rowGap || style.gap || '0') || 0;
+    const measured = Math.ceil(firstItem.getBoundingClientRect().height + gap);
+    if (measured > 0) state.THUMB_ITEM_HEIGHT = measured;
+    updateVirtualWindowSize();
+  });
+}
 
 function renderThumbnailStrip() {
   // Remove old scroll listener
@@ -190,6 +283,7 @@ function renderThumbnailStrip() {
   const filtered = getFilteredImages();
 
   if (filtered.length === 0) {
+    _activeThumbEl = null;
     const empty = document.createElement('div');
     empty.className = 'thumb-empty';
     empty.textContent = 'No images match this filter.';
@@ -200,6 +294,7 @@ function renderThumbnailStrip() {
   // For small sets render everything directly (no virtual overhead)
   if (filtered.length <= state.VIRTUAL_WINDOW) {
     renderThumbRange(filtered, 0, filtered.length);
+    scheduleThumbHeightCalibration();
     highlightActiveThumbnail();
     return;
   }
@@ -218,16 +313,19 @@ function _renderVirtualStrip(filtered) {
 
   // Spacers
   const topSpacer = document.createElement('div');
+  topSpacer.dataset.isSpacer = 'top';
   topSpacer.style.height = `${start * H}px`;
   topSpacer.style.flexShrink = '0';
 
   const bottomSpacer = document.createElement('div');
+  bottomSpacer.dataset.isSpacer = 'bottom';
   bottomSpacer.style.height = `${(total - end) * H}px`;
   bottomSpacer.style.flexShrink = '0';
 
   els.thumbnailList.appendChild(topSpacer);
   renderThumbRange(filtered, start, end);
   els.thumbnailList.appendChild(bottomSpacer);
+  scheduleThumbHeightCalibration();
 
   highlightActiveThumbnail();
 
@@ -263,11 +361,7 @@ function _rerenderVirtualStrip() {
   }
 
   renderThumbRange(filtered, start, end);
-
-  // Re-insert bottom spacer at end
-  const bottomSpacer = els.thumbnailList.lastChild;
-  // Move bottom spacer to end (it was before the newly inserted items)
-  els.thumbnailList.appendChild(bottomSpacer);
+  scheduleThumbHeightCalibration();
 
   highlightActiveThumbnail();
 }
@@ -284,7 +378,7 @@ function renderThumbRange(filtered, start, end) {
 
     const thumbImg = document.createElement('img');
     thumbImg.loading = 'lazy';
-    thumbImg.src = img.src;  // Use pre-computed URL
+    thumbImg.src = ensureImageSrc(img);
     thumbImg.alt = img.filename;
     thumbImg.decoding = 'async';
 
@@ -300,13 +394,12 @@ function renderThumbRange(filtered, start, end) {
     item.appendChild(badge);
     item.appendChild(nameEl);
 
-    item.addEventListener('click', () => navigateToFilteredIndex(filteredIdx));
     frag.appendChild(item);
   }
 
   // Insert before bottom spacer if it exists, else just append
   const lastChild = els.thumbnailList.lastChild;
-  const isBottomSpacer = lastChild && lastChild.dataset && lastChild.dataset.isSpacer;
+  const isBottomSpacer = lastChild && lastChild.dataset && lastChild.dataset.isSpacer === 'bottom';
   if (isBottomSpacer) {
     els.thumbnailList.insertBefore(frag, lastChild);
   } else {
@@ -315,27 +408,66 @@ function renderThumbRange(filtered, start, end) {
 }
 
 function highlightActiveThumbnail() {
-  const items = els.thumbnailList.querySelectorAll('.thumbnail-item');
-  const filtered = getFilteredImages();
-  items.forEach(item => {
-    const idx = parseInt(item.dataset.filteredIdx, 10);
-    item.classList.toggle('active', idx === state.currentIndex);
-  });
+  if (_activeThumbEl) _activeThumbEl.classList.remove('active');
+
+  if (state.currentIndex < 0) {
+    _activeThumbEl = null;
+    return;
+  }
+
+  const nextActive = els.thumbnailList.querySelector(`[data-filtered-idx="${state.currentIndex}"]`);
+  if (!nextActive) {
+    _activeThumbEl = null;
+    return;
+  }
+
+  nextActive.classList.add('active');
+  _activeThumbEl = nextActive;
 }
 
-function scrollThumbnailIntoView(filteredIdx) {
+function scrollThumbnailIntoView(filteredIdx, source = 'programmatic') {
+  if (source === 'toggle') return;
+
   const filtered = getFilteredImages();
   const total = filtered.length;
   const H = state.THUMB_ITEM_HEIGHT;
   const listEl = els.thumbnailList;
 
-  // Always center the active thumbnail in the visible strip panel
-  const targetScrollTop = Math.max(0, filteredIdx * H - (listEl.clientHeight / 2) + (H / 2));
-  listEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+  if (source === 'keyboard') {
+    const itemTop = filteredIdx * H;
+    const itemBottom = itemTop + H;
+    const viewTop = listEl.scrollTop;
+    const viewBottom = viewTop + listEl.clientHeight;
+    const margin = H * 1.5;
+
+    let targetScrollTop = null;
+    if (itemTop < viewTop + margin) {
+      targetScrollTop = Math.max(0, itemTop - margin);
+    } else if (itemBottom > viewBottom - margin) {
+      targetScrollTop = itemBottom - listEl.clientHeight + margin;
+    }
+
+    if (targetScrollTop !== null) {
+      listEl.scrollTop = targetScrollTop;
+    }
+  } else {
+    const targetScrollTop = Math.max(0, filteredIdx * H - (listEl.clientHeight / 2) + (H / 2));
+    listEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+  }
 
   // Update virtual window if needed for large sets
   if (total > state.VIRTUAL_WINDOW) {
-    const newStart = Math.max(0, filteredIdx - Math.floor(state.VIRTUAL_WINDOW / 2));
+    const margin = Math.max(6, Math.floor(state.VIRTUAL_WINDOW * 0.2));
+    const visibleStart = state.virtualStart;
+    const visibleEnd = visibleStart + state.VIRTUAL_WINDOW - 1;
+
+    let newStart = state.virtualStart;
+    if (filteredIdx < visibleStart + margin) {
+      newStart = Math.max(0, filteredIdx - margin);
+    } else if (filteredIdx > visibleEnd - margin) {
+      newStart = Math.max(0, filteredIdx - state.VIRTUAL_WINDOW + margin + 1);
+    }
+
     if (newStart !== state.virtualStart) {
       state.virtualStart = newStart;
       _rerenderVirtualStrip();
@@ -346,8 +478,7 @@ function scrollThumbnailIntoView(filteredIdx) {
 function updateStripCount() {
   const filtered = getFilteredImages();
   const total = state.images.length;
-  const selectedCount = state.images.filter(i => i.selected).length;
-  els.stripCount.textContent = `${filtered.length} of ${total} · ${selectedCount} selected`;
+  els.stripCount.textContent = `${filtered.length} of ${total} · ${state.selectedCount} selected`;
 }
 
 function updateThumbnailSelectedState(filteredIdx) {
@@ -361,9 +492,47 @@ function updateThumbnailSelectedState(filteredIdx) {
 // ============================================================
 // IMAGE DISPLAY
 // ============================================================
-let _displayRafId = null;
+let _preloadTimer = null;
+let _selectionSaveTimer = null;
+let _selectionSaveChain = Promise.resolve();
 
-function displayImage(filteredIdx) {
+function scheduleAdjacentPreload(filteredIdx) {
+  if (_preloadTimer) clearTimeout(_preloadTimer);
+  _preloadTimer = setTimeout(() => {
+    _preloadTimer = null;
+    preloadAdjacent(filteredIdx);
+  }, 45);
+}
+
+function queueSelectionSave() {
+  if (!state.sourceDir) return;
+
+  if (_selectionSaveTimer) clearTimeout(_selectionSaveTimer);
+  _selectionSaveTimer = setTimeout(() => {
+    _selectionSaveTimer = null;
+
+    const selectedFilenames = state.selectedFilenames.slice();
+    _selectionSaveChain = _selectionSaveChain
+      .then(() => invoke('save_selection', { dir: state.sourceDir, filenames: selectedFilenames }))
+      .catch(() => { });
+  }, 350);
+}
+
+async function flushSelectionSave() {
+  if (_selectionSaveTimer) {
+    clearTimeout(_selectionSaveTimer);
+    _selectionSaveTimer = null;
+
+    const selectedFilenames = state.selectedFilenames.slice();
+    _selectionSaveChain = _selectionSaveChain
+      .then(() => invoke('save_selection', { dir: state.sourceDir, filenames: selectedFilenames }))
+      .catch(() => { });
+  }
+
+  await _selectionSaveChain;
+}
+
+function displayImage(filteredIdx, source = 'programmatic') {
   const filtered = getFilteredImages();
 
   if (filtered.length === 0) {
@@ -380,21 +549,19 @@ function displayImage(filteredIdx) {
   state.currentIndex = filteredIdx;
 
   const img = filtered[filteredIdx];
+  const src = ensureImageSrc(img);
 
-  // Use pre-computed src URL — no repeated convertFileSrc calls
-  if (els.mainImage.src !== img.src) {
+  if (els.mainImage.src !== src) {
     els.mainImage.classList.add('loading');
     els.mainImage.onload = () => els.mainImage.classList.remove('loading');
     els.mainImage.onerror = () => {
       els.mainImage.classList.remove('loading');
       showToast('Failed to load: ' + img.filename);
     };
-    els.mainImage.src = img.src;
+    els.mainImage.src = src;
   }
 
-  // Preload neighbours immediately after paint
-  if (_displayRafId) cancelAnimationFrame(_displayRafId);
-  _displayRafId = requestAnimationFrame(() => preloadAdjacent(filteredIdx));
+  scheduleAdjacentPreload(filteredIdx);
 
   // Status bar
   els.statusFilename.textContent = img.filename;
@@ -410,28 +577,27 @@ function displayImage(filteredIdx) {
     els.selectedOverlay.classList.remove('visible');
   }
 
-  const selectedCount = state.images.filter(i => i.selected).length;
-  els.statusSelectedCount.textContent = selectedCount > 0 ? `(${selectedCount} total selected)` : '';
+  els.statusSelectedCount.textContent = state.selectedCount > 0 ? `(${state.selectedCount} total selected)` : '';
 
   els.btnPrev.disabled = filteredIdx === 0;
   els.btnNext.disabled = filteredIdx === filtered.length - 1;
 
   highlightActiveThumbnail();
-  scrollThumbnailIntoView(filteredIdx);
+  scrollThumbnailIntoView(filteredIdx, source);
 }
 
 // ============================================================
 // NAVIGATION
 // ============================================================
-function navigate(delta) {
+function navigate(delta, source = 'programmatic') {
   const filtered = getFilteredImages();
   if (filtered.length === 0) return;
   const newIdx = Math.max(0, Math.min(state.currentIndex + delta, filtered.length - 1));
-  displayImage(newIdx);
+  displayImage(newIdx, source);
 }
 
-function navigateToFilteredIndex(idx) {
-  displayImage(idx);
+function navigateToFilteredIndex(idx, source = 'pointer') {
+  displayImage(idx, source);
 }
 
 // ============================================================
@@ -444,36 +610,36 @@ async function toggleSelect() {
   const currentImg = filtered[state.currentIndex];
   if (!currentImg) return;
 
-  const masterIdx = state.images.findIndex(img => img.full_path === currentImg.full_path);
-  if (masterIdx === -1) return;
+  const masterIdx = state.pathToIndex.get(currentImg.full_path);
+  if (masterIdx === undefined) return;
 
+  const preservedPath = currentImg.full_path;
   state.images[masterIdx].selected = !state.images[masterIdx].selected;
   currentImg.selected = state.images[masterIdx].selected;
 
-  displayImage(state.currentIndex);
-  updateThumbnailSelectedState(state.currentIndex);
+  recomputeDerivedState();
+
+  if (state.filter === 'all') {
+    displayImage(state.currentIndex, 'toggle');
+    updateThumbnailSelectedState(state.currentIndex);
+  } else {
+    const newFiltered = getFilteredImages();
+    let nextIndex = newFiltered.findIndex(img => img.full_path === preservedPath);
+    if (nextIndex === -1) {
+      nextIndex = Math.min(state.currentIndex, Math.max(0, newFiltered.length - 1));
+    }
+    state.currentIndex = nextIndex;
+    state.virtualStart = Math.max(0, state.currentIndex - Math.floor(state.VIRTUAL_WINDOW / 2));
+    renderThumbnailStrip();
+    displayImage(state.currentIndex);
+  }
+
   updateStripCount();
   updateCompleteButton();
 
   showToast(currentImg.selected ? `✓ ${currentImg.filename} selected` : `✗ ${currentImg.filename} deselected`);
 
-  // Auto-save (non-blocking)
-  try {
-    const selectedFilenames = state.images.filter(i => i.selected).map(i => i.filename);
-    await invoke('save_selection', { dir: state.sourceDir, filenames: selectedFilenames });
-  } catch (_) { }
-
-  if (state.filter !== 'all') {
-    setTimeout(() => {
-      renderThumbnailStrip();
-      updateStripCount();
-      const newFiltered = getFilteredImages();
-      if (state.currentIndex >= newFiltered.length) {
-        state.currentIndex = Math.max(0, newFiltered.length - 1);
-      }
-      if (newFiltered.length > 0) displayImage(state.currentIndex);
-    }, 300);
-  }
+  queueSelectionSave();
 }
 
 // ============================================================
@@ -481,6 +647,7 @@ async function toggleSelect() {
 // ============================================================
 function setFilter(mode) {
   state.filter = mode;
+  recomputeDerivedState();
   state.currentIndex = 0;
   state.virtualStart = 0;
   updateFilterButtons();
@@ -500,7 +667,9 @@ function updateFilterButtons() {
 // COMPLETE SELECTION
 // ============================================================
 async function completeSelection() {
-  const selected = state.images.filter(img => img.selected);
+  await flushSelectionSave();
+
+  const selected = state.selectedImages.slice();
 
   if (selected.length === 0) {
     showModal('error', 'No Images Selected', 'Please select at least one image before completing the selection.');
@@ -552,13 +721,12 @@ function showCopyProgress(current, total, filename) {
 }
 
 function updateCompleteButton() {
-  const selectedCount = state.images.filter(img => img.selected).length;
   const hasImages = state.images.length > 0;
   const hasDest = !!state.destDir;
-  els.btnComplete.disabled = !(hasImages && hasDest && selectedCount > 0);
+  els.btnComplete.disabled = !(hasImages && hasDest && state.selectedCount > 0);
 
-  els.btnComplete.innerHTML = selectedCount > 0
-    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Complete (${selectedCount})`
+  els.btnComplete.innerHTML = state.selectedCount > 0
+    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Complete (${state.selectedCount})`
     : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Complete Selection`;
 }
 
@@ -615,16 +783,23 @@ function _debounce(fn, ms) {
 }
 
 // ============================================================
-// KEYBOARD SHORTCUTS  (debounced at 80ms — fast but coalescable)
+// KEYBOARD SHORTCUTS
 // ============================================================
-const _handleKey = _debounce((e) => {
-  if (state.images.length === 0) return;
-  switch (e.key) {
-    case 'ArrowRight': navigate(1); break;
-    case 'ArrowLeft': navigate(-1); break;
-    case 's': case 'S': toggleSelect(); break;
-  }
-}, 80);
+let _navFramePending = false;
+let _pendingNavDelta = 0;
+
+function queueKeyboardNavigation(delta) {
+  _pendingNavDelta = delta;
+  if (_navFramePending) return;
+
+  _navFramePending = true;
+  requestAnimationFrame(() => {
+    _navFramePending = false;
+    const deltaToApply = _pendingNavDelta;
+    _pendingNavDelta = 0;
+    if (deltaToApply !== 0) navigate(deltaToApply, 'keyboard');
+  });
+}
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -632,7 +807,9 @@ document.addEventListener('keydown', (e) => {
 
   if (['ArrowRight', 'ArrowLeft', 's', 'S'].includes(e.key)) {
     e.preventDefault();
-    _handleKey(e);
+    if (e.key === 'ArrowRight') queueKeyboardNavigation(1);
+    if (e.key === 'ArrowLeft') queueKeyboardNavigation(-1);
+    if ((e.key === 's' || e.key === 'S') && !e.repeat) toggleSelect();
   }
 
   if (e.key === 'Escape') {
@@ -650,9 +827,38 @@ els.btnWelcomeSource.addEventListener('click', pickSourceDir);
 els.btnComplete.addEventListener('click', completeSelection);
 els.modalClose.addEventListener('click', closeModal);
 els.modalOverlay.addEventListener('click', (e) => { if (e.target === els.modalOverlay) closeModal(); });
-els.btnPrev.addEventListener('click', () => navigate(-1));
-els.btnNext.addEventListener('click', () => navigate(1));
+els.btnPrev.addEventListener('click', () => navigate(-1, 'pointer'));
+els.btnNext.addEventListener('click', () => navigate(1, 'pointer'));
 els.filterBtns.forEach(btn => btn.addEventListener('click', () => setFilter(btn.dataset.filter)));
+els.thumbnailList.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+
+  const item = target.closest('.thumbnail-item');
+  if (!item || !els.thumbnailList.contains(item)) return;
+
+  const idx = Number(item.dataset.filteredIdx);
+  if (!Number.isNaN(idx)) navigateToFilteredIndex(idx, 'pointer');
+});
+
+window.addEventListener('resize', _debounce(() => {
+  const oldHeight = state.THUMB_ITEM_HEIGHT;
+  const oldWindow = state.VIRTUAL_WINDOW;
+  scheduleThumbHeightCalibration();
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const changed = state.THUMB_ITEM_HEIGHT !== oldHeight || state.VIRTUAL_WINDOW !== oldWindow;
+      if (changed && getFilteredImages().length > state.VIRTUAL_WINDOW) _rerenderVirtualStrip();
+    });
+  });
+}, 120));
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    void flushSelectionSave();
+  }
+});
 
 // Theme toggle
 const themeToggleBtn = document.getElementById('themeToggle');
@@ -663,6 +869,7 @@ function applyTheme(theme) {
 themeToggleBtn.addEventListener('click', () => {
   const current = document.documentElement.getAttribute('data-theme');
   applyTheme(current === 'dark' ? 'light' : 'dark');
+  scheduleThumbHeightCalibration();
 });
 
 // ============================================================
