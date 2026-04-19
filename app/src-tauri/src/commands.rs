@@ -1,15 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use tauri::AppHandle;
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter, Manager};
+use tempfile::NamedTempFile;
 use walkdir::WalkDir;
+
+use crate::thumbnail;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ImageInfo {
     pub filename: String,
     pub full_path: String,
+    pub file_size: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +96,7 @@ pub async fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
             .map(|e| ImageInfo {
                 filename: e.file_name().to_string_lossy().to_string(),
                 full_path: e.path().to_string_lossy().to_string(),
+                file_size: e.metadata().map(|m| m.len()).unwrap_or(0),
             })
             .collect();
 
@@ -104,6 +109,24 @@ pub async fn list_images(dir: String) -> Result<Vec<ImageInfo>, String> {
     })
     .await
     .map_err(|e| format!("Scan error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn get_thumbnail(path: String, app: AppHandle) -> Result<String, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Failed to resolve cache directory: {}", e))?
+        .join("thumbs");
+
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .map_err(|e| format!("Failed to create thumbnail cache directory: {}", e))?;
+
+    thumbnail::get_or_create_thumbnail(Path::new(&path), &cache_dir)
+        .await
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
 }
 
 /// Copies selected files to the destination directory.
@@ -195,10 +218,25 @@ pub async fn save_selection(dir: String, filenames: Vec<String>) -> Result<(), S
         let selection = SelectionFile {
             selected_images: filenames,
         };
+        let path = Path::new(&dir).join("selection.json");
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Failed to resolve selection.json parent directory".to_string())?;
         let json = serde_json::to_string_pretty(&selection)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        let path = Path::new(&dir).join("selection.json");
-        fs::write(&path, json).map_err(|e| format!("Failed to write selection.json: {}", e))?;
+
+        let mut temp_file = NamedTempFile::new_in(parent)
+            .map_err(|e| format!("Failed to create temporary selection file: {}", e))?;
+        temp_file
+            .write_all(json.as_bytes())
+            .map_err(|e| format!("Failed to write temporary selection file: {}", e))?;
+        temp_file
+            .flush()
+            .map_err(|e| format!("Failed to flush temporary selection file: {}", e))?;
+        temp_file
+            .persist(&path)
+            .map_err(|e| format!("Failed to persist selection.json: {}", e.error))?;
+
         Ok(())
     })
     .await

@@ -1,4 +1,5 @@
 mod commands;
+mod thumbnail;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -8,6 +9,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::list_images,
+            commands::get_thumbnail,
             commands::copy_files,
             commands::save_selection,
             commands::load_selection,

@@ -400,9 +400,14 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--bg-active) transparent;
   padding: 6px;
-  display: flex;
-  flex-direction: column;
+  display: block;
+  position: relative;
   gap: 4px;
+}
+
+.thumbnail-strip-content {
+  position: relative;
+  min-height: 100%;
 }
 
 .thumbnail-list::-webkit-scrollbar {
@@ -416,7 +421,9 @@ body {
 
 /* Individual Thumbnail */
 .thumbnail-item {
-  position: relative;
+  position: absolute;
+  left: 0;
+  right: 0;
   border-radius: var(--radius-sm);
   overflow: hidden;
   cursor: pointer;
@@ -537,7 +544,9 @@ body {
   border-radius: 4px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
   display: block;
-  transition: opacity 0.1s ease;
+  transform: rotate(var(--viewer-rotation, 0deg));
+  transform-origin: center center;
+  transition: opacity 0.1s ease, transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
 }
 
@@ -837,9 +846,9 @@ kbd {
   font-size: 12px;
 }
 
-/* GPU compositing hint for smoother image transitions */
+/* GPU compositing hint for smoother image transitions and rotation */
 #mainImage {
-  will-change: opacity;
+  will-change: opacity, transform;
 }
 
 /* ============================================================
